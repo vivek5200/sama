@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sama"
+version = "0.1.0"
+description = "Calibrated decision engine (open-source alternative to Jev and Laya)"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "Apache-2.0"}
+dependencies = [
+    "torch>=2.0",
+    "transformers>=4.40",
+    "huggingface-hub>=0.20",
+    "pydantic>=2.0",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+server = ["fastapi", "uvicorn"]
