@@ -1,0 +1,9 @@
+{
+  "timestamp": "2026-10-02T11:35:17Z",
+  "mmlu_accuracy": 0.5246666666666666,
+  "arc_accuracy": 0.6728395061728395,
+  "ece_uncal": 0.03259842321276667,
+  "ece_cal": 0.01570263345065417,
+  "optimal_temperature": 1.1122448979591837,
+  "head_params": 1053704
+}

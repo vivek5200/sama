@@ -1,8 +1,12 @@
 __pycache__/
 *.pyc
+*.egg-info/
+.pytest_cache/
 .venv/
+venv/
 hf-env/
 .DS_Store
 .ipynb_checkpoints/
-sama.egg-info/
-*.egg-info/
+dist/
+build/
+eval_results.json

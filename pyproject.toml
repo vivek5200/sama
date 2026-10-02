@@ -4,11 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sama"
-version = "0.1.0"
+version = "0.2.0"
 description = "Calibrated decision engine (open-source alternative to Jev and Laya)"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "Apache-2.0"}
+authors = [{name = "Vivek"}]
 dependencies = [
     "torch>=2.0",
     "transformers>=4.40",
@@ -20,6 +21,11 @@ dependencies = [
 
 [project.optional-dependencies]
 server = ["fastapi", "uvicorn"]
+dev = ["pytest", "pytest-cov", "black", "ruff"]
+train = ["datasets>=2.14", "matplotlib>=3.5"]
+
+[project.scripts]
+sama = "sama.cli:main"
 
 [tool.setuptools]
 packages = ["sama"]

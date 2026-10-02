@@ -1,0 +1,35 @@
+{
+  "encoder": "Qwen/Qwen2.5-1.5B",
+  "hidden_dim": 1536,
+  "head_architecture": {
+    "type": "TypedDecisionHead",
+    "proj_dim": 512,
+    "max_options": 8,
+    "dropout": 0.15,
+    "num_params": 1053704
+  },
+  "training": {
+    "objective": "RLCD (cross-entropy + 0.5 * Brier)",
+    "epochs_run": 30,
+    "lr": 5e-05,
+    "batch_size": 64,
+    "weight_decay": 0.1,
+    "data": {
+      "mmlu_train": 8000,
+      "mmlu_val": 2000,
+      "arc_val": 200
+    }
+  },
+  "calibration": {
+    "method": "temperature_scaling",
+    "T": 1.1122448979591837,
+    "ECE_uncal": 0.03259842321276667,
+    "ECE_cal": 0.01570263345065417
+  },
+  "evaluation": {
+    "mmlu_accuracy": 0.5246666666666666,
+    "arc_accuracy": 0.6728395061728395
+  },
+  "license": "Apache-2.0",
+  "version": "0.2.0"
+}

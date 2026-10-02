@@ -1,4 +1,5 @@
 import json
+import os
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -28,9 +29,13 @@ class DecisionEngine:
         self.repo_id = repo_id
         self.device = device
 
-        # Download head + config
-        head_path = hf_hub_download(repo_id=repo_id, filename="head.pt")
-        config_path = hf_hub_download(repo_id=repo_id, filename="config.json")
+        # Load head + config from local path or HuggingFace
+        if os.path.isdir(repo_id):
+            head_path = os.path.join(repo_id, "head.pt")
+            config_path = os.path.join(repo_id, "config.json")
+        else:
+            head_path = hf_hub_download(repo_id=repo_id, filename="head.pt")
+            config_path = hf_hub_download(repo_id=repo_id, filename="config.json")
         with open(config_path) as f:
             self.config = json.load(f)
 
@@ -52,7 +57,8 @@ class DecisionEngine:
         self.encoder.eval()
 
         # Load head
-        self.head = TypedDecisionHead()
+        hidden_dim = self.config.get("hidden_dim", 896)
+        self.head = TypedDecisionHead(hidden_dim=hidden_dim)
         self.head.load_state_dict(torch.load(head_path, map_location="cpu"))
         self.head = self.head.to(self.encoder.device)
         self.head.eval()
