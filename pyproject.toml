@@ -19,3 +19,6 @@ dependencies = [
 
 [project.optional-dependencies]
 server = ["fastapi", "uvicorn"]
+
+[tool.setuptools]
+packages = ["sama"]

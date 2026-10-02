@@ -4,3 +4,5 @@ __pycache__/
 hf-env/
 .DS_Store
 .ipynb_checkpoints/
+sama.egg-info/
+*.egg-info/
