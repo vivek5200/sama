@@ -39,9 +39,16 @@ class DecisionEngine:
         self.tokenizer = AutoTokenizer.from_pretrained(encoder_id)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
-        self.encoder = AutoModel.from_pretrained(
+        try:
+            self.encoder = AutoModel.from_pretrained(
             encoder_id, dtype=torch.bfloat16, device_map=device,
-        )
+            )
+        except (ValueError, ImportError):
+            # Fallback: no accelerate, load to a specific device
+            target_device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.encoder = AutoModel.from_pretrained(
+            encoder_id, dtype=torch.bfloat16,
+            ).to(target_device)
         self.encoder.eval()
 
         # Load head
@@ -58,17 +65,19 @@ class DecisionEngine:
         return cls(repo_id, **kwargs)
 
     def _format_state(self, state, questions):
+        """Match the training format exactly."""
         parts = [state, ""]
         for qid, q in questions.items():
-            parts.append(f"Question ({qid}): {q['instructions']}")
+            parts.append(f"Question: {q['instructions']}")
             if q.get("type") == "choice":
                 opts = q["options"]
                 if isinstance(opts, dict):
                     opts = list(opts.keys())
-                parts.append("Options: " + " | ".join(f"({chr(65+j)}) {o}" for j, o in enumerate(opts)))
+                # Match training: space-separated (A) x (B) y
+                opts_str = " ".join(f"({chr(65+j)}) {o}" for j, o in enumerate(opts))
+                parts.append(f"Options: {opts_str}")
         parts.append("Answer:")
         return "\n".join(parts)
-
     @torch.no_grad()
     def decide(self, state, questions, auto_threshold=0.9, review_threshold=0.7):
         text = self._format_state(state, questions)

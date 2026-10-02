@@ -1,16 +1,29 @@
+"""Sama example: calibrated decision engine.
+
+Usage:
+    python example.py
+"""
 from sama import DecisionEngine
 
-engine = DecisionEngine.from_pretrained("Vivek1225/sama-qwen-0.5b")
 
-result = engine.decide(
-    state="Customer says invoice was double-charged. Account #12345.",
-    questions={
-        "department": {
-            "type": "choice",
-            "instructions": "Which team should handle this?",
-            "options": ["billing", "technical", "sales", "support"]
-        }
-    }
-)
+def main():
+    print("Loading Sama...")
+    engine = DecisionEngine.from_pretrained("Vivek1225/sama-qwen-0.5b")
+    print("Loaded.\n")
 
-print(result.model_dump_json(indent=2))
+    # MMLU-style question (matches training distribution)
+    result = engine.decide(
+        state="What is the chemical symbol for gold?",
+        questions={
+            "answer": {
+                "type": "choice",
+                "instructions": "Which of the following is the correct answer?",
+                "options": ["Au", "Ag", "Gd", "Go"],
+            }
+        },
+    )
+    print(result.model_dump_json(indent=2))
+
+
+if __name__ == "__main__":
+    main()
