@@ -8,11 +8,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY requirements.txt ./requirements.txt
+COPY spaces/sama-itsm-demo/requirements.txt ./requirements.txt
 RUN python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir -r requirements.txt
 
-COPY app.py choice_head_5class.pt ./
+COPY sama ./sama
+COPY spaces/sama-itsm-demo/app.py spaces/sama-itsm-demo/choice_head_5class.pt ./
 
 EXPOSE 7860
 

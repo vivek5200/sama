@@ -5,12 +5,16 @@ on:
     branches: [main]
     paths:
       - "spaces/sama-itsm-demo/**"
+      - "sama/**"
+      - "pyproject.toml"
       - ".github/workflows/itsm-image-deploy.yml"
       - ".github/workflows/test.yml"
   push:
     branches: [main]
     paths:
       - "spaces/sama-itsm-demo/**"
+      - "sama/**"
+      - "pyproject.toml"
       - ".github/workflows/itsm-image-deploy.yml"
       - ".github/workflows/test.yml"
 
@@ -57,7 +61,8 @@ jobs:
       - name: Build image and publish on main
         uses: docker/build-push-action@v7
         with:
-          context: ./spaces/sama-itsm-demo
+          context: .
+          file: ./spaces/sama-itsm-demo/Dockerfile
           platforms: linux/arm64
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
           tags: |
