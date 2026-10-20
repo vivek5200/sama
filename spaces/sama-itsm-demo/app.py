@@ -381,11 +381,14 @@ with gr.Blocks(
                 "The column names must be exactly `text` and `label`. Each row is one example."
             )
             gr.Textbox(
-                "text,label\n\"Cannot reset my password\",Technical\n"
-                "\"Please send my latest invoice\",Financial\n"
-                "\"What are the office hours?\",General",
-                language="markdown",
+                value=(
+                    "text,label\n\"Cannot reset my password\",Technical\n"
+                    "\"Please send my latest invoice\",Financial\n"
+                    "\"What are the office hours?\",General"
+                ),
+                lines=4,
                 label="Example CSV contents",
+                interactive=False,
             )
         csv_file = gr.File(
             label="Upload your labeled CSV",
