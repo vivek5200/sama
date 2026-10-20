@@ -1,5 +1,7 @@
 FROM --platform=linux/arm64 python:3.11-slim
 
+LABEL org.opencontainers.image.source="https://github.com/vivek5200/sama"
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     HF_HOME=/cache/huggingface

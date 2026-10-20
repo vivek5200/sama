@@ -1,8 +1,6 @@
 services:
   sama-itsm:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    image: ghcr.io/vivek5200/sama-itsm-demo:latest
     platform: linux/arm64
     container_name: sama-itsm
     restart: unless-stopped
@@ -10,6 +8,16 @@ services:
       - "127.0.0.1:7860:7860"
     volumes:
       - hf-cache:/cache/huggingface
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:7860/', timeout=5)
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20m
 
 volumes:
   hf-cache:

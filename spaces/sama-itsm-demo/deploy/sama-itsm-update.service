@@ -1,0 +1,11 @@
+[Unit]
+Description=Pull and deploy the latest Sama ITSM image
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+TimeoutStartSec=35min
+Environment=APP_DIR=/root/projects/sama/spaces/sama-itsm-demo
+ExecStart=/usr/local/sbin/sama-itsm-update
