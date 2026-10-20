@@ -1,0 +1,15 @@
+services:
+  sama-itsm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    platform: linux/arm64
+    container_name: sama-itsm
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7860:7860"
+    volumes:
+      - hf-cache:/cache/huggingface
+
+volumes:
+  hf-cache:

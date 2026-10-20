@@ -61,4 +61,4 @@ demo = gr.Interface(
     description="Paste a support ticket. Sama uses a frozen 1.5B encoder + 1M param head to route it locally with guaranteed precision (ECE 0.0092)."
 )
 
-demo.launch()
+demo.launch(server_name="0.0.0.0", server_port=7860)
