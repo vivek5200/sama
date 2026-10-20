@@ -25,6 +25,13 @@ base_model: Qwen/Qwen2.5-1.5B
 
 Open-source, non-autoregressive, runs locally. Apache 2.0.
 
+## 🏆 Featured Domain Model: ITSM Ticket Router
+
+We've fine-tuned Sama for IT Support Ticket Routing. It achieves **ECE 0.0092** (4× better calibration than Jev) and can safely auto-route 30% of tickets locally at 89% precision, saving significant LLM API costs.
+
+- **Try the interactive demo:** [HuggingFace Space](https://huggingface.co/spaces/Vivek1225/sama-itsm-demo)
+- **Model weights:** [HuggingFace Model](https://huggingface.co/Vivek1225/sama-itsm-v0.1)
+
 ## Comparison
 
 | Feature | Sama | Jev (TypeSafe) | Laya (Convai) | GPT-4o-mini |
@@ -37,10 +44,11 @@ Open-source, non-autoregressive, runs locally. Apache 2.0.
 
 ## Results
 
-| Version | Encoder | MMLU | ARC | ECE | Head Params |
-|:---|:---|:---|:---|:---|:---|
-| v0.1 | Qwen2.5-0.5B | 38.9% | 41.1% | 0.025 | 726K |
-| **v0.2** | **Qwen2.5-1.5B** | **52.5%** | **67.3%** | **0.016** | **1.05M** |
+| Version | Encoder | Heads | MMLU | ARC | BoolQ | SST-5 |
+|:---|:---|:---|:---|:---|:---|:---|
+| v0.1 | Qwen2.5-0.5B | choice | 38.9% | 41.1% | — | — |
+| v0.2 | Qwen2.5-1.5B | choice | 52.5% | 67.3% | — | — |
+| v0.3 | Qwen2.5-1.5B | choice+noul+score | 55.0% | 68.9% | 77.6% | 52.8% |
 
 ECE (Expected Calibration Error) measures the gap between confidence and accuracy. Lower is better.
 

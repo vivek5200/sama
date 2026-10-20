@@ -1,0 +1,88 @@
+{
+  "schema_version": "1.0.0",
+  "package_version": "0.3.0",
+  "format_version": "1.0.0",
+  "encoder": "Qwen/Qwen2.5-1.5B",
+  "hidden_dim": 1536,
+  "heads": {
+    "choice": {
+      "file": "choice_head.pt",
+      "head_type": "choice",
+      "format_version": "1.0.0",
+      "encoder_id": "Qwen/Qwen2.5-1.5B",
+      "hidden_dim": 1536,
+      "proj_dim": 512,
+      "max_options": 8,
+      "num_params": 1053704,
+      "trained_on": [
+        "mmlu",
+        "arc"
+      ],
+      "calibration": {
+        "method": "power_scaling",
+        "temperature": 1.0,
+        "ece_after": 0.03244974957903228,
+        "n_bins": 10,
+        "fitted_on": "choice_val"
+      }
+    },
+    "noul": {
+      "file": "noul_head.pt",
+      "head_type": "noul",
+      "format_version": "1.0.0",
+      "encoder_id": "Qwen/Qwen2.5-1.5B",
+      "hidden_dim": 1536,
+      "proj_dim": 512,
+      "num_params": 1050113,
+      "trained_on": [
+        "boolq"
+      ],
+      "calibration": {
+        "method": "power_scaling",
+        "temperature": 1.0860759493670886,
+        "ece_after": 0.016433070194466035,
+        "n_bins": 10,
+        "fitted_on": "boolq_val"
+      }
+    },
+    "score": {
+      "file": "score_head.pt",
+      "head_type": "score",
+      "format_version": "1.0.0",
+      "encoder_id": "Qwen/Qwen2.5-1.5B",
+      "hidden_dim": 1536,
+      "proj_dim": 512,
+      "max_levels": 8,
+      "num_params": 1053704,
+      "trained_on": [
+        "sst5"
+      ],
+      "calibration": {
+        "method": "power_scaling",
+        "temperature": 1.0860759493670886,
+        "ece_after": 0.023237123950574187,
+        "n_bins": 10,
+        "fitted_on": "sst5_val"
+      }
+    }
+  },
+  "evaluation": {
+    "mmlu": {
+      "accuracy": 0.55,
+      "ece_cal": 0.03244974957903228
+    },
+    "arc": {
+      "accuracy": 0.6888111888111889,
+      "ece_cal": 0.031125185112436334
+    },
+    "boolq": {
+      "accuracy": 0.7761467889908257,
+      "ece_cal": 0.016433070194466035
+    },
+    "sst5": {
+      "accuracy": 0.528054298642534,
+      "ece_cal": 0.023237123950574187
+    }
+  },
+  "license": "Apache-2.0"
+}

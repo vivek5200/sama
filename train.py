@@ -17,7 +17,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoModel, AutoTokenizer
 
-from sama.engine import TypedDecisionHead
+from sama.heads import ChoiceHead
 from sama.losses import rlcd_choice_loss
 
 
@@ -128,7 +128,7 @@ def train(args):
         print(f"[SMOKE TEST] Device: {device}")
         
         hidden_dim = 1536
-        head = TypedDecisionHead(hidden_dim=hidden_dim).to(device)
+        head = ChoiceHead(hidden_dim=hidden_dim).to(device)
         n_params = sum(p.numel() for p in head.parameters() if p.requires_grad)
         print(f"[SMOKE TEST] Head params: {n_params:,}")
         
@@ -146,7 +146,7 @@ def train(args):
             labels = torch.randint(0, 4, (bsz,))
             
             head_out = head(pooled)
-            loss = rlcd_choice_loss(head_out["choice_logits"], labels, 4)
+            loss = rlcd_choice_loss(head_out, labels, 4)
             
             optimizer.zero_grad()
             loss.backward()
@@ -211,7 +211,7 @@ def train(args):
     )
 
     # Head
-    head = TypedDecisionHead(hidden_dim=hidden_dim).to(device)
+    head = ChoiceHead(hidden_dim=hidden_dim).to(device)
     n_params = sum(p.numel() for p in head.parameters() if p.requires_grad)
     print(f"Head parameters: {n_params:,}")
 
@@ -238,7 +238,7 @@ def train(args):
             pooled = h[torch.arange(h.shape[0], device=device), seq_lens]
 
             head_out = head(pooled)
-            loss = rlcd_choice_loss(head_out["choice_logits"], labels, 4)
+            loss = rlcd_choice_loss(head_out, labels, 4)
 
             optimizer.zero_grad()
             loss.backward()
@@ -262,7 +262,7 @@ def train(args):
                 pooled = h[torch.arange(h.shape[0], device=device), seq_lens]
 
                 head_out = head(pooled)
-                loss = rlcd_choice_loss(head_out["choice_logits"], labels, 4)
+                loss = rlcd_choice_loss(head_out, labels, 4)
 
                 val_loss_sum += loss.item() * labels.shape[0]
                 val_count += labels.shape[0]

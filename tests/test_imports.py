@@ -19,4 +19,4 @@ def test_import_losses():
 
 def test_version():
     import sama
-    assert sama.__version__ == "0.2.0"
+    assert sama.__version__ == "0.3.0"

@@ -10,13 +10,21 @@ def cmd_decide(args):
 
     engine = DecisionEngine.from_pretrained(args.model)
 
-    questions = {
-        "q": {
-            "type": "choice",
-            "instructions": args.instructions,
-            "options": args.options,
+    if args.question_file:
+        with open(args.question_file) as f:
+            questions = json.load(f)
+    else:
+        if not args.instructions:
+            print("Error: must provide either --question-file or --instructions", file=sys.stderr)
+            sys.exit(1)
+        questions = {
+            "q": {
+                "type": args.type,
+                "instructions": args.instructions,
+            }
         }
-    }
+        if args.options:
+            questions["q"]["options"] = args.options
 
     result = engine.decide(state=args.state, questions=questions)
     print(result.model_dump_json(indent=2))
@@ -56,10 +64,14 @@ def main():
                           help="HuggingFace repo ID or local path")
     p_decide.add_argument("--state", required=True,
                           help="Context / state text")
-    p_decide.add_argument("--instructions", required=True,
+    p_decide.add_argument("--instructions",
                           help="Question instructions")
-    p_decide.add_argument("--options", nargs="+", required=True,
+    p_decide.add_argument("--options", nargs="+",
                           help="Choice options")
+    p_decide.add_argument("--type", default="choice",
+                          help="Question type (choice, noul, score)")
+    p_decide.add_argument("--question-file",
+                          help="JSON file containing questions dict")
 
     # --- serve ---
     p_serve = sub.add_parser("serve", help="Start the FastAPI server")

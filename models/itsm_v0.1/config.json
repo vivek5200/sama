@@ -1,0 +1,54 @@
+{
+  "schema_version": "1.0.0",
+  "package_version": "0.3.1-itsm",
+  "format_version": "1.0.0",
+  "encoder": "Qwen/Qwen2.5-1.5B",
+  "hidden_dim": 1536,
+  "domain": "it-support-tickets",
+  "heads": {
+    "choice": {
+      "file": "choice_head.pt",
+      "head_type": "choice",
+      "max_options": 5,
+      "proj_dim": 512,
+      "hidden_dim": 1536,
+      "format_version": "1.0.0",
+      "calibration": {
+        "method": "power_scaling",
+        "temperature": 1.071,
+        "n_bins": 10
+      }
+    },
+    "noul": {
+      "file": "noul_head.pt",
+      "head_type": "noul",
+      "proj_dim": 512,
+      "hidden_dim": 1536,
+      "format_version": "1.0.0",
+      "calibration": {
+        "method": "power_scaling",
+        "temperature": 0.984,
+        "n_bins": 10
+      }
+    },
+    "score": {
+      "file": "score_head.pt",
+      "head_type": "score",
+      "proj_dim": 512,
+      "max_levels": 8,
+      "hidden_dim": 1536,
+      "format_version": "1.0.0",
+      "calibration": {
+        "method": "power_scaling",
+        "temperature": 1.018,
+        "n_bins": 10
+      }
+    }
+  },
+  "evaluation": {
+    "choice_queue": {"accuracy": 0.6960, "ece_cal": 0.0092},
+    "noul": {"accuracy": 0.7060, "ece_cal": 0.0102},
+    "score": {"accuracy": 0.5468, "ece_cal": 0.0171}
+  },
+  "license": "Apache-2.0"
+}

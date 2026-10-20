@@ -4,12 +4,32 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.3.1] - 2026-10-20
 
-### Planned
-- Full `noul` and `score` question type support (v0.3)
-- Multilingual support — 30+ languages (v0.4)
-- Ternary inference for edge deployment (v0.5)
+### Added
+- **ITSM Domain Model (`sama-itsm-v0.1`)**: Fine-tuned 4-head model for IT Support Ticket routing.
+- 5-class coarse queue router achieving 69.6% accuracy and 0.0092 ECE.
+- Gradio Space demo for live ticket routing.
+- HuggingFace model card for the ITSM model.
+
+## [0.3.0] - 2026-10-02
+
+### Added
+- Full `noul` (yes/no) support, validated on BoolQ
+- Full `score` (ordinal) support, validated on SST-5
+- Three specialist heads (choice, noul, score) replacing the multi-task head
+- Explicit architecture: `encoder.py`, `format.py`, `heads.py`, `calibrate.py`, `engine.py`, `types.py`
+- Versioned format strings (`FORMAT_VERSION = "1.0.0"`)
+- Per-head calibration with power-scaling temperatures
+- `ARCHITECTURE.md` documenting module contracts
+- Failure-mode tests for all documented errors
+
+### Changed
+- Renamed the previous `v0.3` (multi-task) to v0.3 specialists
+- Public API unchanged: `DecisionEngine.from_pretrained(repo).decide(state, questions)`
+
+### Fixed
+- Mixed-batch crash when choice questions had different option counts
 
 ## [0.2.0] - 2026-10-02
 

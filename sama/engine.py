@@ -1,119 +1,205 @@
+"""Sama v0.3 — specialist dispatch engine."""
+
 import json
 import os
+import time
+from typing import Dict, Union
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModel, AutoTokenizer
-from huggingface_hub import hf_hub_download
-from typing import Dict
+from huggingface_hub import snapshot_download
+
+from .encoder import FrozenEncoder
+from .format import format_question, FORMAT_VERSION, check_format_compatibility, FormatVersionError
+from .heads import load_head, HEAD_CLASSES
+from .calibrate import apply_power_scaling
 from .types import Decision, DecisionResponse
 
 
-class TypedDecisionHead(nn.Module):
-    def __init__(self, hidden_dim=896, proj_dim=512, max_options=8, dropout=0.15):
-        super().__init__()
-        self.proj = nn.Sequential(
-            nn.Linear(hidden_dim, proj_dim), nn.GELU(),
-            nn.Dropout(dropout),
-            nn.Linear(proj_dim, proj_dim), nn.GELU(),
-            nn.Dropout(dropout),
-        )
-        self.choice_head = nn.Linear(proj_dim, max_options)
-
-    def forward(self, h):
-        return {"choice_logits": self.choice_head(self.proj(h))}
-
-
 class DecisionEngine:
-    def __init__(self, repo_id, device="auto", temperature=None):
-        self.repo_id = repo_id
-        self.device = device
+    """Dispatch wrapper: routes questions to specialist heads by type."""
 
-        # Load head + config from local path or HuggingFace
-        if os.path.isdir(repo_id):
-            head_path = os.path.join(repo_id, "head.pt")
-            config_path = os.path.join(repo_id, "config.json")
-        else:
-            head_path = hf_hub_download(repo_id=repo_id, filename="head.pt")
-            config_path = hf_hub_download(repo_id=repo_id, filename="config.json")
-        with open(config_path) as f:
+    def __init__(self, model_dir: str, device: str = "auto"):
+        self.model_dir = model_dir
+        self.device_arg = device
+
+        # Load config
+        with open(os.path.join(model_dir, "config.json")) as f:
             self.config = json.load(f)
 
+        # Validate format version
+        cfg_format = self.config.get("format_version", "1.0.0")
+        check_format_compatibility(cfg_format)
+
         # Load encoder
-        encoder_id = self.config.get("encoder", "Qwen/Qwen2.5-0.5B")
-        self.tokenizer = AutoTokenizer.from_pretrained(encoder_id)
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
-        try:
-            self.encoder = AutoModel.from_pretrained(
-            encoder_id, dtype=torch.bfloat16, device_map=device,
-            )
-        except (ValueError, ImportError):
-            # Fallback: no accelerate, load to a specific device
-            target_device = "cuda" if torch.cuda.is_available() else "cpu"
-            self.encoder = AutoModel.from_pretrained(
-            encoder_id, dtype=torch.bfloat16,
-            ).to(target_device)
-        self.encoder.eval()
+        encoder_id = self.config["encoder"]
+        self.encoder = FrozenEncoder(encoder_id, device=device)
+        hidden_dim = self.config.get("hidden_dim", self.encoder.hidden_dim)
 
-        # Load head
-        hidden_dim = self.config.get("hidden_dim", 896)
-        self.head = TypedDecisionHead(hidden_dim=hidden_dim)
-        self.head.load_state_dict(torch.load(head_path, map_location="cpu"))
-        self.head = self.head.to(self.encoder.device)
-        self.head.eval()
+        # Load all available heads
+        self.heads: Dict[str, torch.nn.Module] = {}
+        self.calibrations: Dict[str, dict] = {}
 
-        # Temperature from config
-        self.temperature = temperature or self.config.get("calibration", {}).get("T", 1.0)
+        for head_type, meta in self.config.get("heads", {}).items():
+            # Validate head format compatibility
+            head_format = meta.get("format_version", "1.0.0")
+            check_format_compatibility(head_format)
+
+            head_path = os.path.join(model_dir, meta["file"])
+            if not os.path.exists(head_path):
+                continue
+            self.heads[head_type] = load_head(head_type, hidden_dim, head_path, self.encoder.device)
+            self.calibrations[head_type] = meta.get("calibration", {})
+
+        # --- Backward compatibility: v0.1 / v0.2 single-head format ---
+        # If config.json declares "head_architecture" (old style), auto-detect and register
+        # as a "choice" head.
+        if not self.heads and "head_architecture" in self.config:
+            self._load_legacy_head(model_dir, hidden_dim)
+
+    def _load_legacy_head(self, model_dir: str, hidden_dim: int):
+        """Load a v0.1/v0.2 style head (single choice head)."""
+        from .heads import ChoiceHead
+
+        head_path = os.path.join(model_dir, "head.pt")
+        state = torch.load(head_path, map_location="cpu")
+
+        # Rename old keys
+        renamed = {}
+        for k, v in state.items():
+            if k.startswith("choice_head."):
+                renamed[k.replace("choice_head.", "head.")] = v
+            else:
+                renamed[k] = v
+
+        head = ChoiceHead(hidden_dim=hidden_dim)
+        head.load_state_dict(renamed)
+        head = head.to(self.encoder.device).eval()
+        for p in head.parameters():
+            p.requires_grad = False
+
+        self.heads = {"choice": head}
+        T = self.config.get("calibration", {}).get("T", 1.0)
+        self.calibrations = {"choice": {"temperature": T, "method": "power_scaling"}}
 
     @classmethod
-    def from_pretrained(cls, repo_id, **kwargs):
-        return cls(repo_id, **kwargs)
+    def from_pretrained(cls, repo_id_or_path: str, device: str = "auto", cache_dir=None):
+        if os.path.isdir(repo_id_or_path):
+            return cls(repo_id_or_path, device=device)
+        model_dir = snapshot_download(
+            repo_id_or_path, cache_dir=cache_dir,
+            allow_patterns=["*.pt", "*.json"],
+        )
+        return cls(model_dir, device=device)
 
-    def _format_state(self, state, questions):
-        """Match the training format exactly."""
-        parts = [state, ""]
-        for qid, q in questions.items():
-            parts.append(f"Question: {q['instructions']}")
-            if q.get("type") == "choice":
-                opts = q["options"]
-                if isinstance(opts, dict):
-                    opts = list(opts.keys())
-                # Match training: space-separated (A) x (B) y
-                opts_str = " ".join(f"({chr(65+j)}) {o}" for j, o in enumerate(opts))
-                parts.append(f"Options: {opts_str}")
-        parts.append("Answer:")
-        return "\n".join(parts)
     @torch.no_grad()
-    def decide(self, state, questions, auto_threshold=0.9, review_threshold=0.7):
-        text = self._format_state(state, questions)
-        enc = self.tokenizer(text, return_tensors="pt", truncation=True,
-                             max_length=2048).to(self.encoder.device)
-        out = self.encoder(**enc, output_hidden_states=True)
-        h = out.hidden_states[-1].float()
-        seq_lens = enc["attention_mask"].sum(dim=1) - 1
-        pooled = h[torch.arange(h.shape[0]), seq_lens]
+    def decide(self, state: str, questions: dict,
+               auto_threshold: float = 0.9,
+               review_threshold: float = 0.7) -> DecisionResponse:
+        t_total = time.time()
 
-        head_out = self.head(pooled)
+        # 1. Format all questions
+        qids = list(questions.keys())
+        texts = [format_question(state, questions[qid]) for qid in qids]
 
-        decisions = {}
-        for qid, q in questions.items():
-            if q["type"] == "choice":
-                k = len(q["options"]) if isinstance(q["options"], list) else len(q["options"])
-                logits = head_out["choice_logits"][0, :k] / self.temperature
-                probs = F.softmax(logits, dim=-1).cpu().numpy()
-                pred = int(probs.argmax())
-                conf = float(probs.max())
-                opts = q["options"]
-                answer = opts[pred] if isinstance(opts, list) else list(opts.keys())[pred]
-                action = "auto" if conf >= auto_threshold else (
-                    "soft_review" if conf >= review_threshold else "escalate")
-                decisions[qid] = Decision(
-                    answer=answer,
-                    probabilities=[float(p) for p in probs],
-                    confidence=conf,
-                    action=action,
-                    status="confident" if conf >= review_threshold else "uncertain",
+        # 2. Encode once
+        t_enc = time.time()
+        embeddings = self.encoder.encode_last_token(texts)
+        encode_ms = (time.time() - t_enc) * 1000
+
+        # 3. Group by head type
+        by_type = {}
+        for i, qid in enumerate(qids):
+            t = questions[qid]["type"]
+            by_type.setdefault(t, []).append(i)
+
+        # 4. Check availability
+        for t in by_type:
+            if t not in self.heads:
+                raise MissingHeadError(
+                    f"No {t!r} head loaded. Available: {list(self.heads.keys())}. "
+                    f"For multi-task or choice-only heads, load a different model."
                 )
 
-        return DecisionResponse(decisions=decisions)
+        # 5. Run each head on its batch
+        decisions: Dict[str, Decision] = {}
+        t_head = time.time()
+
+        for head_type, indices in by_type.items():
+            head = self.heads[head_type]
+            h = embeddings[indices]
+            logits = head(h)
+            T = self.calibrations[head_type].get("temperature", 1.0)
+
+            for j, i in enumerate(indices):
+                qid = qids[i]
+                q = questions[qid]
+
+                if head_type == "choice":
+                    k = len(q["options"])
+                     # Need to index properly into logits by adding dim 0 if multiple questions
+                    # Wait, if h is (batch, hidden), logits is (batch, options)
+                    probs = F.softmax(logits[j, :k], dim=-1).cpu().numpy()
+                    # Apply power scaling on the max probability
+                    pred = int(probs.argmax())
+                    raw_conf = float(probs.max())
+                    cal_conf = apply_power_scaling(raw_conf, T)
+                    decisions[qid] = Decision(
+                        answer=q["options"][pred] if isinstance(q["options"], list) else list(q["options"].keys())[pred],
+                        probabilities=[float(p) for p in probs],
+                        confidence=cal_conf,
+                        action=self._action(cal_conf, auto_threshold, review_threshold),
+                        status="confident" if cal_conf >= review_threshold else "uncertain",
+                    )
+
+                elif head_type == "noul":
+                    p_yes = torch.sigmoid(logits[j]).item()
+                    conf = max(p_yes, 1 - p_yes)
+                    cal_conf = apply_power_scaling(conf, T)
+                    decisions[qid] = Decision(
+                        answer=bool(p_yes > 0.5),
+                        probabilities=[float(1 - p_yes), float(p_yes)],
+                        confidence=cal_conf,
+                        action=self._action(cal_conf, auto_threshold, review_threshold),
+                        status="confident" if cal_conf >= review_threshold else "uncertain",
+                    )
+
+                elif head_type == "score":
+                    k = len(q["levels"])
+                    probs = F.softmax(logits[j, :k], dim=-1).cpu().numpy()
+                    pred = int(probs.argmax())
+                    raw_conf = float(probs.max())
+                    cal_conf = apply_power_scaling(raw_conf, T)
+                    decisions[qid] = Decision(
+                        answer=q["levels"][pred],
+                        probabilities=[float(p) for p in probs],
+                        confidence=cal_conf,
+                        action=self._action(cal_conf, auto_threshold, review_threshold),
+                        status="confident" if cal_conf >= review_threshold else "uncertain",
+                    )
+
+        head_ms = (time.time() - t_head) * 1000
+        total_ms = (time.time() - t_total) * 1000
+
+        return DecisionResponse(
+            decisions=decisions,
+            meta={
+                "total_latency_ms": total_ms,
+                "encode_latency_ms": encode_ms,
+                "head_latency_ms": head_ms,
+                "encoder_id": self.config.get("encoder"),
+                "format_version": FORMAT_VERSION,
+                "package_version": self.config.get("package_version", "0.3.0"),
+            },
+        )
+
+    @staticmethod
+    def _action(conf: float, auto_t: float, review_t: float) -> str:
+        if conf >= auto_t:
+            return "auto"
+        if conf >= review_t:
+            return "soft_review"
+        return "escalate"
+
+
+class MissingHeadError(RuntimeError):
+    pass

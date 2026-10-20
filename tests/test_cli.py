@@ -68,6 +68,8 @@ def test_decide_produces_json():
             state="Customer says invoice was double-charged.",
             instructions="Which team should handle this?",
             options=["billing", "technical", "sales", "support"],
+            type="choice",
+            question_file=None,
         )
 
         # Patch DecisionEngine in the sama module used by cli

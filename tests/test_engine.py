@@ -1,75 +1,40 @@
-"""Test that _format_state produces the exact training format."""
-from sama.engine import DecisionEngine, TypedDecisionHead
+import pytest
+
+def test_engine_loads_v0_1():
+    from sama import DecisionEngine
+    e = DecisionEngine.from_pretrained("./models/v0.1")
+    assert "choice" in e.heads
 
 
-class FakeEngine:
-    """Minimal stub to test _format_state without loading a real model."""
-    _format_state = DecisionEngine._format_state
+def test_engine_loads_v0_2():
+    from sama import DecisionEngine
+    e = DecisionEngine.from_pretrained("./models/v0.2")
+    assert "choice" in e.heads
 
 
-def test_format_state_basic():
-    engine = FakeEngine()
-    result = engine._format_state(
-        "What is the chemical symbol for gold?",
-        {
-            "answer": {
-                "type": "choice",
-                "instructions": "Which of the following is the correct answer?",
-                "options": ["Au", "Ag", "Gd", "Go"],
-            }
-        },
-    )
-    expected = (
-        "What is the chemical symbol for gold?\n"
-        "\n"
-        "Question: Which of the following is the correct answer?\n"
-        "Options: (A) Au (B) Ag (C) Gd (D) Go\n"
-        "Answer:"
-    )
-    assert result == expected, f"Format mismatch:\n{result!r}\n!=\n{expected!r}"
+def test_engine_loads_v0_3():
+    from sama import DecisionEngine
+    e = DecisionEngine.from_pretrained("./models/v0.3")
+    assert "choice" in e.heads
+    assert "noul" in e.heads
+    assert "score" in e.heads
 
 
-def test_format_state_dict_options():
-    """Options can be a dict — keys should be used."""
-    engine = FakeEngine()
-    result = engine._format_state(
-        "Context here",
-        {
-            "q": {
-                "type": "choice",
-                "instructions": "Pick one",
-                "options": {"Yes": 1, "No": 0},
-            }
-        },
-    )
-    assert "(A) Yes" in result
-    assert "(B) No" in result
-    # No pipe separators
-    assert " | " not in result
+def test_missing_head_error():
+    from sama import DecisionEngine
+    from sama.engine import MissingHeadError
+    e = DecisionEngine.from_pretrained("./models/v0.2")  # choice only
+    with pytest.raises(MissingHeadError):
+        e.decide("test", {"q": {"type": "noul", "instructions": "is this true?"}})
 
 
-def test_format_state_no_qid_in_output():
-    """The question line must NOT include the question ID."""
-    engine = FakeEngine()
-    result = engine._format_state(
-        "Some context",
-        {
-            "my_question_id": {
-                "type": "choice",
-                "instructions": "Which is correct?",
-                "options": ["A", "B", "C", "D"],
-            }
-        },
-    )
-    assert "my_question_id" not in result
-    assert "Question: Which is correct?" in result
-
-
-def test_typed_decision_head_output_shape():
-    """TypedDecisionHead should return choice_logits with max_options columns."""
-    import torch
-    head = TypedDecisionHead(hidden_dim=64, proj_dim=32, max_options=4)
-    h = torch.randn(2, 64)
-    out = head(h)
-    assert "choice_logits" in out
-    assert out["choice_logits"].shape == (2, 4)
+def test_format_version_mismatch_raises(tmp_path):
+    # Create a fake config with wrong format version
+    import json
+    from sama import DecisionEngine
+    from sama.format import FormatVersionError
+    cfg = {"encoder": "Qwen/Qwen2.5-0.5B", "hidden_dim": 896,
+           "format_version": "0.5.0", "heads": {}}
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    with pytest.raises(FormatVersionError):
+        DecisionEngine(str(tmp_path))
