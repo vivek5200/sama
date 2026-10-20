@@ -5,21 +5,27 @@ from transformers import AutoModel, AutoTokenizer
 
 
 class FrozenEncoder:
-    def __init__(self, encoder_id: str, device: str = "auto"):
+    def __init__(
+        self,
+        encoder_id: str,
+        device: str = "auto",
+        dtype: torch.dtype = torch.float16,
+    ):
         self.encoder_id = encoder_id
+        self.dtype = dtype
         self.tokenizer = AutoTokenizer.from_pretrained(encoder_id)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
         try:
             self.model = AutoModel.from_pretrained(
-                encoder_id, dtype=torch.float16, device_map=device,
+                encoder_id, dtype=dtype, device_map=device,
             )
         except (ValueError, ImportError):
             # Fallback if accelerate not installed
             target = "cuda" if torch.cuda.is_available() else "cpu"
             self.model = AutoModel.from_pretrained(
-                encoder_id, dtype=torch.float16,
+                encoder_id, dtype=dtype,
             ).to(target)
 
         self.model.eval()

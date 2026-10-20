@@ -32,7 +32,20 @@ class DecisionEngine:
 
         # Load encoder
         encoder_id = self.config["encoder"]
-        self.encoder = FrozenEncoder(encoder_id, device=device)
+        encoder_dtype_name = self.config.get("encoder_dtype", "float16")
+        encoder_dtypes = {
+            "float16": torch.float16,
+            "float32": torch.float32,
+            "bfloat16": torch.bfloat16,
+        }
+        if encoder_dtype_name not in encoder_dtypes:
+            raise ValueError(
+                f"Unsupported encoder_dtype {encoder_dtype_name!r}; "
+                f"choose one of {', '.join(encoder_dtypes)}."
+            )
+        self.encoder = FrozenEncoder(
+            encoder_id, device=device, dtype=encoder_dtypes[encoder_dtype_name]
+        )
         hidden_dim = self.config.get("hidden_dim", self.encoder.hidden_dim)
 
         # Load all available heads

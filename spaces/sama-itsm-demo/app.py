@@ -1,9 +1,11 @@
 import ipaddress
+import json
 import logging
 import os
 import tempfile
 import threading
 import time
+import zipfile
 
 # Gradio must know the managed cache directory before it is imported. Training
 # artifacts are written there so Gradio can serve and later clean them up.
@@ -18,7 +20,10 @@ import pandas as pd
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from sama import __version__ as SAMA_VERSION
+from sama.encoder import FrozenEncoder
+from sama.format import format_choice
+from sama.heads import ChoiceHead
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("sama-itsm")
@@ -80,16 +85,9 @@ def _create_cache_file(suffix):
 
 # 1. Load Encoder and Base Head
 print("Loading models...")
-tokenizer = AutoTokenizer.from_pretrained("Qwen/Qwen2.5-1.5B")
-# Qwen's tokenizer may not define a padding token; use EOS for padded batches.
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
-
-encoder = AutoModelForCausalLM.from_pretrained(
-    "Qwen/Qwen2.5-1.5B", dtype=torch.float32
-)
-encoder.config.pad_token_id = tokenizer.pad_token_id
-encoder.eval()
+ENCODER_ID = "Qwen/Qwen2.5-1.5B"
+ENCODER_DTYPE = "float32"
+encoder = FrozenEncoder(ENCODER_ID, device="cpu", dtype=torch.float32)
 
 
 class ChoiceHead5(nn.Module):
@@ -116,25 +114,52 @@ head.eval()
 OPTIONS = ["Technical", "Financial", "General", "Sales", "Internal"]
 
 
+CUSTOM_HEAD_INSTRUCTIONS = "Which support queue should handle this ticket?"
+MAX_CUSTOM_CLASSES = 8
+
+
+def _build_custom_head():
+    # Use Sama's native choice-head layout so DecisionEngine can load the bundle.
+    return ChoiceHead(hidden_dim=encoder.hidden_dim, max_options=MAX_CUSTOM_CLASSES)
+
+
+def _encode_tickets(
+    ticket_texts,
+    labels,
+    batch_size=8,
+    progress_fn=None,
+    progress_start=0.0,
+    progress_span=0.0,
+    progress_desc="Encoding examples",
+):
+    formatted = [
+        format_choice(
+            text,
+            {"instructions": CUSTOM_HEAD_INSTRUCTIONS, "options": labels},
+        )
+        for text in ticket_texts
+    ]
+    batches = []
+    starts = range(0, len(formatted), batch_size)
+    for batch_index, start in enumerate(starts, start=1):
+        batches.append(
+            encoder.encode_last_token(formatted[start : start + batch_size], max_length=320)
+        )
+        if progress_fn:
+            progress_fn(
+                progress_start + progress_span * batch_index / len(starts),
+                desc=f"{progress_desc} ({batch_index}/{len(starts)})",
+            )
+    return torch.cat(batches, dim=0).float()
+
+
 # 2. Inference Function
 def route_ticket(ticket_text):
     if not ticket_text or not ticket_text.strip():
         return "⚠️ **Enter a ticket description to get a routing suggestion.**"
 
-    text = (
-        f"{ticket_text}\n\nQuestion: Which support queue should handle this ticket?\n"
-        "Type: choice\nOptions: "
-        + " ".join(f"({chr(65 + j)}) {opt}" for j, opt in enumerate(OPTIONS))
-        + "\nAnswer:"
-    )
-
-    enc = tokenizer(text, return_tensors="pt", truncation=True, max_length=320)
     with torch.no_grad():
-        out = encoder(**enc, output_hidden_states=True, logits_to_keep=1)
-        h = out.hidden_states[-1].float()
-        seq_lens = enc["attention_mask"].sum(dim=1) - 1
-        pooled = h[torch.arange(h.shape[0]), seq_lens]
-
+        pooled = _encode_tickets([ticket_text], OPTIONS)
         logits = head(pooled)[0]
         probs = F.softmax(logits / 1.071, dim=-1).numpy()  # T=1.071
 
@@ -152,6 +177,122 @@ def route_ticket(ticket_text):
         )
 
 
+def _load_custom_head(trained_model):
+    if not trained_model:
+        raise ValueError("Train a classifier first.")
+    model_path = trained_model.get("model_path")
+    if not model_path or not os.path.isfile(model_path):
+        raise FileNotFoundError("This trained model has expired. Train it again.")
+    labels = trained_model.get("labels", [])
+    if not 2 <= len(labels) <= MAX_CUSTOM_CLASSES:
+        raise ValueError("The saved classifier has an invalid label mapping.")
+    custom_head = _build_custom_head()
+    custom_head.load_state_dict(
+        torch.load(model_path, map_location="cpu", weights_only=True)
+    )
+    custom_head.eval()
+    return custom_head, labels
+
+
+def test_custom_classifier(ticket_text, trained_model):
+    if not ticket_text or not ticket_text.strip():
+        return "⚠️ **Enter a ticket description to test your classifier.**"
+    try:
+        custom_head, labels = _load_custom_head(trained_model)
+        with torch.no_grad():
+            pooled = _encode_tickets([ticket_text.strip()], labels)
+            probabilities = F.softmax(custom_head(pooled)[0, : len(labels)], dim=-1)
+            best_id = int(probabilities.argmax().item())
+            confidence = float(probabilities[best_id].item())
+        return (
+            f"### Custom prediction: {labels[best_id]}\n\n"
+            f"**Model score:** {confidence:.1%}\n\n"
+            "This result comes from your uploaded training examples. Review it before use."
+        )
+    except (ValueError, FileNotFoundError) as exc:
+        return f"ℹ️ **{exc}**"
+    except Exception:
+        logger.exception("Testing a custom classifier failed")
+        return "❌ **Could not test this classifier.** Try training it again."
+
+
+def evaluate_custom_classifier(file, trained_model, progress=gr.Progress(track_tqdm=True)):
+    if file is None:
+        return "⚠️ **Upload a labeled test CSV first.**"
+    if not trained_model:
+        return "ℹ️ **Train a classifier in the Train Your Own tab first.**"
+
+    try:
+        file_path = file.name if hasattr(file, "name") else os.fspath(file)
+        if os.path.splitext(file_path)[1].lower() != ".csv":
+            return "⚠️ **The test file must have a `.csv` extension.**"
+        if os.path.getsize(file_path) > 2 * 1024 * 1024:
+            return "⚠️ **The test CSV is larger than 2 MB.** Reduce its size and try again."
+        try:
+            df = pd.read_csv(file_path)
+        except (pd.errors.ParserError, pd.errors.EmptyDataError, UnicodeDecodeError, ValueError):
+            return "⚠️ **We couldn't read this as a valid CSV.** Check the file and try again."
+        if "text" not in df.columns or "label" not in df.columns:
+            return "⚠️ **The test CSV needs columns named `text` and `label`.**"
+        if not 1 <= len(df) <= 300:
+            return "⚠️ **The test CSV must contain between 1 and 300 data rows.**"
+        if df[["text", "label"]].isna().any().any():
+            return "⚠️ **Some `text` or `label` cells are empty.** Fill them in and try again."
+
+        texts = df["text"].astype(str).str.strip().tolist()
+        targets = df["label"].astype(str).str.strip().tolist()
+        if any(not text for text in texts) or any(not label for label in targets):
+            return "⚠️ **Every test row needs non-empty text and label values.**"
+
+        custom_head, labels = _load_custom_head(trained_model)
+        label2id = {label: index for index, label in enumerate(labels)}
+        unknown_labels = sorted(set(targets) - set(label2id))
+        if unknown_labels:
+            shown = ", ".join(f"`{label}`" for label in unknown_labels[:5])
+            return (
+                "⚠️ **The test CSV contains labels that were not in the training data:** "
+                f"{shown}. Use the exact same label names."
+            )
+
+        with torch.no_grad():
+            features = _encode_tickets(
+                texts,
+                labels,
+                batch_size=8,
+                progress_fn=progress,
+                progress_start=0.05,
+                progress_span=0.75,
+                progress_desc="Encoding test examples",
+            )
+            logits = custom_head(features)[:, : len(labels)]
+            predictions = logits.argmax(dim=-1).tolist()
+        target_ids = [label2id[label] for label in targets]
+        accuracy = sum(p == y for p, y in zip(predictions, target_ids)) / len(target_ids)
+
+        class_f1 = []
+        evaluated_class_ids = sorted(set(target_ids) | set(predictions))
+        for class_id in evaluated_class_ids:
+            true_positive = sum(p == class_id and y == class_id for p, y in zip(predictions, target_ids))
+            false_positive = sum(p == class_id and y != class_id for p, y in zip(predictions, target_ids))
+            false_negative = sum(p != class_id and y == class_id for p, y in zip(predictions, target_ids))
+            denominator = 2 * true_positive + false_positive + false_negative
+            class_f1.append(2 * true_positive / denominator if denominator else 0.0)
+        macro_f1 = sum(class_f1) / len(class_f1)
+
+        return (
+            "### Evaluation complete\n\n"
+            f"- **Examples evaluated:** {len(target_ids)}\n"
+            f"- **Accuracy:** {accuracy:.1%}\n"
+            f"- **Macro-F1:** {macro_f1:.3f}\n\n"
+            "Use a test CSV that was not used to train the classifier for a more useful estimate."
+        )
+    except (ValueError, OSError) as exc:
+        return f"⚠️ **Could not evaluate this test file:** {exc}"
+    except Exception:
+        logger.exception("Custom classifier evaluation failed")
+        return "❌ **Evaluation couldn't be completed because of an internal error.** Try again later."
+
+
 # 3. Training Function
 def train_custom_head(
     file,
@@ -159,56 +300,61 @@ def train_custom_head(
     progress=gr.Progress(track_tqdm=True),
 ):
     if file is None:
-        return None, None, "⚠️ **Choose a CSV file first.**"
+        return None, "⚠️ **Choose a CSV file first.**", None
 
     try:
         file_path = file.name if hasattr(file, "name") else os.fspath(file)
     except (TypeError, ValueError):
-        return None, None, "⚠️ **The uploaded file could not be read. Please upload it again.**"
+        return None, "⚠️ **The uploaded file could not be read. Please upload it again.**", None
 
     if os.path.splitext(file_path)[1].lower() != ".csv":
-        return None, None, "⚠️ **This file does not have a `.csv` extension.**"
+        return None, "⚠️ **This file does not have a `.csv` extension.**", None
 
     try:
         if os.path.getsize(file_path) > 2 * 1024 * 1024:
-            return None, None, "⚠️ **The CSV is larger than 2 MB.** Reduce its size and try again."
+            return None, "⚠️ **The CSV is larger than 2 MB.** Reduce its size and try again.", None
     except OSError:
-        return None, None, "⚠️ **The uploaded file is no longer available. Please upload it again.**"
+        return None, "⚠️ **The uploaded file is no longer available. Please upload it again.**", None
 
     try:
         progress(0.02, desc="Reading and checking your CSV")
         try:
             df = pd.read_csv(file_path)
         except (pd.errors.ParserError, pd.errors.EmptyDataError, UnicodeDecodeError, ValueError):
-            return None, None, "⚠️ **We couldn't read this as a valid CSV.** Check the file and try again."
+            return None, "⚠️ **We couldn't read this as a valid CSV.** Check the file and try again.", None
         if "text" not in df.columns or "label" not in df.columns:
-            return None, None, (
+            return None, (
                 "⚠️ **Your CSV needs columns named `text` and `label`.** "
                 "Column names are case-sensitive."
-            )
+            ), None
         if len(df) == 0:
-            return None, None, "⚠️ **Your CSV has a header but no data rows.** Add at least two examples."
+            return None, "⚠️ **Your CSV has a header but no data rows.** Add at least two examples.", None
         if len(df) > 300:
             return (
                 None,
-                None,
                 f"⚠️ **Your CSV has {len(df)} rows; the limit is 300.** "
                 "Use the training script for a larger dataset.",
+                None,
             )
         if df[["text", "label"]].isna().any().any():
-            return None, None, "⚠️ **Some `text` or `label` cells are empty.** Fill them in and upload again."
+            return None, "⚠️ **Some `text` or `label` cells are empty.** Fill them in and upload again.", None
 
         texts = df["text"].astype(str).str.strip().tolist()
         labels_list = df["label"].astype(str).str.strip().tolist()
         if any(not text for text in texts):
-            return None, None, "⚠️ **Every row needs ticket text.** Remove blank `text` cells and try again."
+            return None, "⚠️ **Every row needs ticket text.** Remove blank `text` cells and try again.", None
         if any(not label for label in labels_list):
-            return None, None, "⚠️ **Every row needs a label.** Remove blank `label` cells and try again."
+            return None, "⚠️ **Every row needs a label.** Remove blank `label` cells and try again.", None
 
         # Keep the class order stable in the order labels first appear in the CSV.
         labels_list = list(dict.fromkeys(labels_list))
         if len(labels_list) < 2:
-            return None, None, "⚠️ **At least two different labels are required** to train a classifier."
+            return None, "⚠️ **At least two different labels are required** to train a classifier.", None
+        if len(labels_list) > MAX_CUSTOM_CLASSES:
+            return None, (
+                f"⚠️ **Your CSV has {len(labels_list)} labels; Sama choice classifiers support "
+                f"up to {MAX_CUSTOM_CLASSES}.** Combine labels and try again."
+            ), None
         label2id = {label: i for i, label in enumerate(labels_list)}
         labels = torch.tensor(
             [label2id[label] for label in df["label"].astype(str).str.strip()],
@@ -221,48 +367,27 @@ def train_custom_head(
         allowed, retry_after = _claim_training_slot(request)
         if not allowed:
             if retry_after is None:
-                return None, None, "⚠️ Training is temporarily busy. Please try again later."
+                return None, "⚠️ Training is temporarily busy. Please try again later.", None
             return (
-                None,
                 None,
                 f"⏳ **Please wait about {retry_after} seconds before training again.** "
                 "Each client can start one training run every five minutes.",
+                None,
             )
 
         # Encode with the frozen encoder in small batches to limit CPU memory use.
-        embeddings = []
-        batch_count = (len(texts) + 7) // 8
-        for batch_index, i in enumerate(range(0, len(texts), 8), start=1):
-            progress(
-                0.05 + 0.65 * batch_index / batch_count,
-                desc=f"Encoding examples ({batch_index}/{batch_count})",
+        with torch.no_grad():
+            X = _encode_tickets(
+                texts,
+                labels_list,
+                batch_size=8,
+                progress_fn=progress,
+                progress_start=0.05,
+                progress_span=0.65,
             )
-            batch = texts[i : i + 8]
-            enc = tokenizer(
-                batch,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=320,
-            )
-            with torch.no_grad():
-                out = encoder(**enc, output_hidden_states=True, logits_to_keep=1)
-                h = out.hidden_states[-1].float()
-                seq_lens = enc["attention_mask"].sum(dim=1) - 1
-                pooled = h[torch.arange(h.shape[0]), seq_lens]
-                embeddings.append(pooled.cpu())
-        X = torch.cat(embeddings, dim=0)
 
-        # Train a compact classifier on the frozen encoder features.
-        custom_head = nn.Sequential(
-            nn.Linear(1536, 512),
-            nn.GELU(),
-            nn.Dropout(0.15),
-            nn.Linear(512, 512),
-            nn.GELU(),
-            nn.Dropout(0.15),
-            nn.Linear(512, num_classes),
-        )
+        # Train Sama's native choice head, masking unused choice slots.
+        custom_head = _build_custom_head()
         opt = torch.optim.AdamW(custom_head.parameters(), lr=2e-5)
         final_loss = 0.0
 
@@ -273,7 +398,7 @@ def train_custom_head(
             )
             custom_head.train()
             opt.zero_grad()
-            logits = custom_head(X)
+            logits = custom_head(X)[:, :num_classes]
             ce = F.cross_entropy(logits, labels)
             p = F.softmax(logits, dim=-1)
             oh = F.one_hot(labels, num_classes).float()
@@ -285,15 +410,98 @@ def train_custom_head(
 
         custom_head.eval()
 
-        # Files in Gradio's temp directory are served as outputs and removed by
-        # Blocks.delete_cache after the configured retention period.
+        # Keep the working state and ZIP in Gradio's managed cache. The working
+        # head is session-referenced; the ZIP is the user's portable download.
         model_path = _create_cache_file(".pt")
         torch.save(custom_head.state_dict(), model_path)
+        bundle_path = _create_cache_file(".zip")
+        config = {
+            "format_version": "1.0.0",
+            "package_version": SAMA_VERSION,
+            "encoder": ENCODER_ID,
+            "encoder_dtype": ENCODER_DTYPE,
+            "hidden_dim": encoder.hidden_dim,
+            "labels": labels_list,
+            "head_architecture": {
+                "type": "choice",
+                "hidden_dim": encoder.hidden_dim,
+                "projection_dim": 512,
+                "max_options": MAX_CUSTOM_CLASSES,
+                "dropout": 0.15,
+            },
+            "heads": {
+                "choice": {
+                    "file": "custom_head.pt",
+                    "format_version": "1.0.0",
+                    "calibration": {"temperature": 1.0},
+                }
+            },
+            "training": {
+                "examples": len(texts),
+                "classes": num_classes,
+                "epochs": 30,
+                "loss": "cross_entropy + 0.5 * brier_score",
+                "instructions": CUSTOM_HEAD_INSTRUCTIONS,
+            },
+        }
+        bundle_readme = '''# Custom Sama ITSM classifier
 
-        mapping_path = _create_cache_file(".txt")
-        with open(mapping_path, "w", encoding="utf-8") as mapping_file:
-            for i, label in enumerate(labels_list):
-                mapping_file.write(f"{i}: {label}\n")
+This bundle contains a custom choice head trained on your labeled examples.
+The frozen encoder is **not** included; Sama downloads `Qwen/Qwen2.5-1.5B`
+the first time it is used. Keep all bundle files together.
+
+## Install Sama
+
+Install the Sama version that supports the `encoder_dtype` field in this config:
+
+```bash
+python -m pip install "git+https://github.com/vivek5200/sama.git"
+```
+
+## Load and predict
+
+```python
+import json
+from sama import DecisionEngine
+
+bundle_dir = "./custom_classifier_bundle"  # directory containing this README
+with open(f"{bundle_dir}/config.json", encoding="utf-8") as f:
+    config = json.load(f)
+
+engine = DecisionEngine.from_pretrained(bundle_dir, device="cpu")
+ticket = "My expense reimbursement has not arrived."
+result = engine.decide(
+    state=ticket,
+    questions={
+        "routing": {
+            "type": "choice",
+            "instructions": config["training"]["instructions"],
+            "options": config["labels"],
+        }
+    },
+)
+decision = result.decisions["routing"]
+print("Predicted label:", decision.answer)
+print("Model score:", decision.confidence)
+```
+
+`custom_head.pt` contains the head weights, `label_mapping.txt` lists the
+integer-to-label mapping, and `config.json` records the encoder, head, and
+training settings. The model score is not a guarantee of correctness; validate
+the classifier on examples that were not used for training.
+'''
+        with tempfile.TemporaryDirectory(prefix="sama-bundle-") as bundle_dir:
+            with open(os.path.join(bundle_dir, "config.json"), "w", encoding="utf-8") as config_file:
+                json.dump(config, config_file, indent=2, ensure_ascii=False)
+            with open(os.path.join(bundle_dir, "label_mapping.txt"), "w", encoding="utf-8") as mapping_file:
+                for class_id, label in enumerate(labels_list):
+                    mapping_file.write(f"{class_id}: {label}\n")
+            with open(os.path.join(bundle_dir, "README.md"), "w", encoding="utf-8") as readme_file:
+                readme_file.write(bundle_readme)
+            with zipfile.ZipFile(bundle_path, "w", zipfile.ZIP_DEFLATED) as bundle:
+                bundle.write(model_path, "custom_head.pt")
+                for filename in ("config.json", "label_mapping.txt", "README.md"):
+                    bundle.write(os.path.join(bundle_dir, filename), filename)
 
         progress(1.0, desc="Preparing your downloads")
         msg = (
@@ -302,14 +510,17 @@ def train_custom_head(
             f"for 30 epochs. Final loss: `{final_loss:.4f}`.\n\n"
             "**Label mapping**\n\n"
             + "\n".join(f"- `{i}` → {label}" for i, label in enumerate(labels_list))
-            + "\n\nDownload both files below. They remain available temporarily, "
-            "so save them before leaving the page."
+            + "\n\nYou can test it in the **Evaluate** tab. Download the ZIP to keep the model, "
+            "label mapping, configuration, and usage instructions together."
         )
-        return model_path, mapping_path, msg
+        return bundle_path, msg, {"model_path": model_path, "labels": labels_list}
 
     except Exception:
         logger.exception("Custom head training failed")
-        for path in (locals().get("model_path"), locals().get("mapping_path")):
+        for path in (
+            locals().get("model_path"),
+            locals().get("bundle_path"),
+        ):
             if path:
                 try:
                     os.remove(path)
@@ -317,9 +528,9 @@ def train_custom_head(
                     logger.warning("Could not remove incomplete training artifact: %s", path)
         return (
             None,
-            None,
             "❌ **Training couldn't be completed because of an internal error.** "
             "Please try again later. If it continues, contact the site owner.",
+            None,
         )
 
 
@@ -332,6 +543,10 @@ with gr.Blocks(
         "# Sama ITSM Router\n"
         "Get a suggested support queue for a ticket, or train a small custom router "
         "from your own labeled examples."
+    )
+    gr.Markdown(
+        "[GitHub repository](https://github.com/vivek5200/sama) · "
+        "[Qwen2.5-1.5B on Hugging Face](https://huggingface.co/Qwen/Qwen2.5-1.5B)"
     )
 
     with gr.Tab("Inference Demo"):
@@ -398,22 +613,85 @@ with gr.Blocks(
         with gr.Row():
             train_button = gr.Button("Train my classifier", variant="primary")
             clear_training_button = gr.Button("Clear training form")
-        with gr.Row():
-            model_download = gr.File(label="1. Model weights (.pt)")
-            mapping_download = gr.File(label="2. Label mapping (.txt)")
+        bundle_download = gr.File(label="Download custom classifier bundle (.zip)")
         train_logs = gr.Markdown(
             "After training, you'll see the result and download links here."
         )
+        trained_head_state = gr.State(None)
         train_button.click(
             fn=train_custom_head,
             inputs=csv_file,
-            outputs=[model_download, mapping_download, train_logs],
+            outputs=[bundle_download, train_logs, trained_head_state],
             concurrency_id="model-work",
             concurrency_limit=2,
         )
+
+        gr.Markdown("### Test your trained classifier")
+        gr.Markdown(
+            "Enter a new ticket to see which label your custom model predicts. "
+            "Train a model above first; testing uses the same shared encoder."
+        )
+        custom_test_input = gr.Textbox(
+            lines=3,
+            label="Ticket to classify",
+            placeholder="Example: My expense reimbursement has not arrived.",
+        )
+        test_custom_button = gr.Button("Test custom classifier", variant="primary")
+        custom_test_output = gr.Markdown(
+            "Your custom model prediction will appear here."
+        )
+        test_custom_button.click(
+            fn=test_custom_classifier,
+            inputs=[custom_test_input, trained_head_state],
+            outputs=custom_test_output,
+            concurrency_id="model-work",
+            concurrency_limit=2,
+        )
+
         clear_training_button.click(
-            fn=lambda: (None, None, None, "After training, you'll see the result and download links here."),
-            outputs=[csv_file, model_download, mapping_download, train_logs],
+            fn=lambda: (
+                None,
+                None,
+                "After training, you'll see the result and download links here.",
+                None,
+                "Your custom model prediction will appear here.",
+                None,
+            ),
+            outputs=[
+                csv_file,
+                bundle_download,
+                train_logs,
+                custom_test_input,
+                custom_test_output,
+                trained_head_state,
+            ],
+        )
+
+    with gr.Tab("Evaluate"):
+        gr.Markdown(
+            "Upload labeled examples that were **not used for training** to measure how well "
+            "your latest custom classifier generalizes. The CSV must have `text` and `label` "
+            "columns, use the exact labels from training, and contain up to 300 rows / 2 MB."
+        )
+        evaluation_csv = gr.File(
+            label="Upload held-out test CSV",
+            file_types=[".csv"],
+            type="filepath",
+        )
+        with gr.Row():
+            evaluate_button = gr.Button("Evaluate classifier", variant="primary")
+            clear_evaluation_button = gr.ClearButton(
+                components=[evaluation_csv], value="Clear test CSV"
+            )
+        evaluation_output = gr.Markdown(
+            "Train a classifier first, then upload a labeled test CSV to see its metrics."
+        )
+        evaluate_button.click(
+            fn=evaluate_custom_classifier,
+            inputs=[evaluation_csv, trained_head_state],
+            outputs=evaluation_output,
+            concurrency_id="model-work",
+            concurrency_limit=2,
         )
 
 demo.queue(max_size=10, default_concurrency_limit=2, api_open=False)
